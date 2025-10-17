@@ -1,47 +1,64 @@
-import { Schema, model, Document } from "mongoose";
-import bcrypt from "bcrypt";
+import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IUser extends Document {
   email: string;
   password: string;
-  role: "user" | "admin";
-  isValidPassword(password: string): Promise<boolean>;
+  firstName: string;
+  lastName: string;
+  role: 'user' | 'admin';
+  accountNumber: string;
+  balance: number;
+  createdAt: Date;
 }
 
+export interface IUserDocument extends IUser, Document {
+  _id: string; 
+}
 
 const userSchema = new Schema<IUser>({
   email: {
     type: String,
     required: true,
-    lowercase: true,
     unique: true,
+    lowercase: true,
+    trim: true
   },
   password: {
     type: String,
+    required: true
+  },
+  firstName: {
+    type: String,
     required: true,
+    trim: true
+  },
+  lastName: {
+    type: String,
+    required: true,
+    trim: true
   },
   role: {
     type: String,
-    enum: ["user", "admin"],
-    default: "user",
+    enum: ['user', 'admin'],
+    default: 'user'
   },
-});
-
-userSchema.pre("save", async function (next) {
-  try {
-    if (this.isNew) {
-      const salt = await bcrypt.genSalt(10);
-      this.password = await bcrypt.hash(this.password, salt);
-    }
-    next();
-  } catch (error) {
-    next(error as Error);
+  accountNumber: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  balance: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
   }
 });
 
+userSchema.index({ email: 1 });
+userSchema.index({ accountNumber: 1 });
 
-userSchema.methods.isValidPassword = async function (password: string): Promise<boolean> {
-  return bcrypt.compare(password, this.password);
-};
-
-export const User = model<IUser>("User", userSchema);
+export default mongoose.model<IUser>('User', userSchema);

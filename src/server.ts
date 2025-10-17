@@ -1,50 +1,53 @@
-import dotenv from "dotenv";
-dotenv.config();
+import 'dotenv/config';
 
-import express from "express";
-import type { Request, Response, NextFunction } from "express";
-import morgan from "morgan";
-import createError from "http-errors";
-import { verifyAccessToken } from "./helpers/jwt_helper";
-import { connectDB } from "./helpers/init_mongodb";
-import "./helpers/init_redis";
-import AuthRoute from "./Routes/auth.route";
+import express, { Application, Request, Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
+import { connectRedis } from './config/redis';
+import config from './config/config';
 
-console.log("Loaded MONGODB_URI:", process.env.MONGODB_URI);
+import authRoutes from './routes/auth.route';
+import accountRoutes from './routes/account.route';
+import transferRoutes from './routes/transfer.route';
+import adminRoutes from './routes/admin.route';
 
+const app: Application = express();
 
-const app = express();
-
-// Middleware
-app.use(morgan("dev"));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Test route (protected)
-app.get("/", verifyAccessToken, async (req: Request, res: Response) => {
-  res.send("Hello from Express.");
+app.use('/api/auth', authRoutes);
+app.use('/api/account', accountRoutes);
+app.use('/api', transferRoutes);
+app.use('/api/admin', adminRoutes);
+
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Auth routes
-app.use("/auth", AuthRoute);
-
-// 404 handler
-app.use(async (req: Request, res: Response, next: NextFunction) => {
-  next(createError.NotFound());
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
-// Error handler
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  res.status(err.status || 500).send({
-    error: {
-      status: err.status || 500,
-      message: err.message,
-    },
-  });
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
 });
 
-const PORT = process.env.PORT || 3000;
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-connectDB().then(() => {
-  app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-});
+const startServer = async (): Promise<void> => {
+  try {
+    await mongoose.connect(config.MONGODB_URI);
+    console.log(' Connected to MongoDB');
+    
+    await connectRedis();
+    console.log(' Connected to Redis');
+    
+    app.listen(config.PORT, () => {
+      console.log(` Server running on port ${config.PORT}`);
+      console.log(` bankApi available at http://localhost:${config.PORT}/api`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();

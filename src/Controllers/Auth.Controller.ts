@@ -1,85 +1,125 @@
-import createError from "http-errors";
-import type { Request, Response, NextFunction } from "express";
-import { User } from "../Models/user.model";
-import { authSchema } from "../helpers/validation_schema";
-import {
-  signAccessToken,
-  signRefreshToken,
-  verifyRefreshToken,
-} from "../helpers/jwt_helper";
-import redisClient from "../helpers/init_redis";
+import { Request, Response } from 'express';
+import bcrypt from 'bcryptjs';
+import User, { IUserDocument }  from '../models/User.model';
+import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../helpers/jwt.helper';
+import { storeRefreshToken, getRefreshToken, deleteRefreshToken } from '../helpers/redis.helper';
+import { generateAccountNumber, formatUserResponse } from '../helpers/account.helper';
 
-export const register = async (req: Request, res: Response, next: NextFunction) => {
+
+export const signup = async (req: Request, res: Response): Promise<void> => {
   try {
-    const result = await authSchema.validateAsync(req.body);
+    const { email, password, firstName, lastName, role = 'user' } = req.body;
 
-    const doesExist = await User.findOne({ email: result.email });
-    if (doesExist)
-      throw createError.Conflict(`${result.email} is already registered`);
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      res.status(409).json({ error: 'User already exists' });
+      return;
+    }
 
-    const user = new User(result);
-    const savedUser = await user.save();
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-    const accessToken = await signAccessToken(savedUser.id);
-    const refreshToken = await signRefreshToken(savedUser.id);
+    const accountNumber = generateAccountNumber();
 
-    res.status(201).json({ accessToken, refreshToken });
-  } catch (error: any) {
-    if (error.isJoi === true) error.status = 422;
-    next(error);
+    const user = new User({
+      email,
+      password: hashedPassword,
+      firstName,
+      lastName,
+      role: role as 'user' | 'admin',
+      accountNumber,
+      balance: 0
+    });
+
+    await user.save();
+
+    res.status(201).json({
+      message: 'User created successfully',
+      user: formatUserResponse(user)
+    });
+  } catch (error) {
+    console.error('Signup error:', error);
+    res.status(500).json({ error: 'Server error during signup' });
   }
 };
 
-export const login = async (req: Request, res: Response, next: NextFunction) => {
+export const signin = async (req: Request, res: Response): Promise<void> => {
   try {
-    const result = await authSchema.validateAsync(req.body);
-    const user = await User.findOne({ email: result.email });
+    const { email, password } = req.body;
 
-    if (!user) throw createError.NotFound("User not registered");
+    const user: IUserDocument | null = await User.findOne({ email });
+    if (!user) {
+      res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
 
-    const isMatch = await user.isValidPassword(result.password);
-    if (!isMatch)
-      throw createError.Unauthorized("Invalid username or password");
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
 
-    const accessToken = await signAccessToken(user.id);
-    const refreshToken = await signRefreshToken(user.id);
+    const accessToken = generateAccessToken(user._id.toString(), user.role);
+    const refreshToken = generateRefreshToken(user._id.toString(), user.role);
 
-    res.json({ accessToken, refreshToken });
-  } catch (error: any) {
-    if (error.isJoi === true)
-      return next(createError.BadRequest("Invalid Username/Password"));
-    next(error);
+    await storeRefreshToken(user._id.toString(), refreshToken);
+
+    res.json({
+      message: 'Sign in successful',
+      accessToken,
+      refreshToken,
+      user: formatUserResponse(user)
+    });
+  } catch (error) {
+    console.error('Signin error:', error);
+    res.status(500).json({ error: 'Server error during signin' });
   }
 };
 
-export const refreshToken = async (req: Request, res: Response, next: NextFunction) => {
+export const refresh = async (req: Request, res: Response): Promise<void> => {
   try {
     const { refreshToken } = req.body;
-    if (!refreshToken) throw createError.BadRequest("Missing refresh token");
 
-    const userId = await verifyRefreshToken(refreshToken);
-    const accessToken = await signAccessToken(userId);
-    const newRefreshToken = await signRefreshToken(userId);
+    if (!refreshToken) {
+      res.status(401).json({ error: 'Refresh token required' });
+      return;
+    }
 
-    res.json({ accessToken, refreshToken: newRefreshToken });
-  } catch (error) {
-    next(error);
+    const decoded = verifyRefreshToken(refreshToken);
+
+    const storedToken = await getRefreshToken(decoded.userId);
+    if (!storedToken || storedToken !== refreshToken) {
+      res.status(401).json({ error: 'Invalid refresh token' });
+      return;
+    }
+
+    const newAccessToken = generateAccessToken(decoded.userId, decoded.role);
+
+    res.json({
+      message: 'Token refreshed successfully',
+      accessToken: newAccessToken
+    });
+  } catch (error: any) {
+    if (error.name === 'TokenExpiredError') {
+      res.status(401).json({ error: 'Refresh token expired' });
+      return;
+    }
+    console.error('Refresh token error:', error);
+    res.status(401).json({ error: 'Invalid refresh token' });
   }
 };
 
-export const logout = async (req: Request, res: Response, next: NextFunction) => {
+export const signout = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { refreshToken } = req.body;
-    if (!refreshToken) throw createError.BadRequest("Missing refresh token");
+    if (!req.userId) {
+      res.status(401).json({ error: 'User not authenticated' });
+      return;
+    }
 
-    const userId = await verifyRefreshToken(refreshToken);
-    const result = await redisClient.del(userId);
+    await deleteRefreshToken(req.userId);
 
-    if (result === 0)
-      console.warn("No session found in Redis for user:", userId);
-
-    res.sendStatus(204);
+    res.json({ message: 'Signed out successfully' });
   } catch (error) {
-    next(error);
+    console.error('Signout error:', error);
+    res.status(500).json({ error: 'Server error during signout' });
   }
 };
